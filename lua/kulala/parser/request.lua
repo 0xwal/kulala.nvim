@@ -25,6 +25,7 @@ local M = {}
 ---@field url_raw string -- The raw URL as it appears in the document
 ---@field request_target string|nil -- The target of the request
 ---@field http_version string -- The HTTP version of the request
+---@field type "rest"|"graphql"|"grpc"|"websocket" -- The type of the request, determined based on the method, metadata and headers
 ---
 ---@field headers table<string, string> -- The headers with variables and dynamic variables replaced
 ---@field headers_raw table<string, string> -- The headers as they appear in the document
@@ -163,6 +164,46 @@ local function parse_headers(headers, variables, env, silent)
   end)
 end
 
+local function get_file_with_replaced_variables(path, request)
+  local contents = FS.read_file(path)
+
+  if vim.fn.fnamemodify(path, ":e") == "graphql" or vim.fn.fnamemodify(path, ":e") == "gql" then
+    contents = contents:gsub("#[^\n]*", "") -- remove comments from GraphQL files
+  end
+
+  contents = StringVariablesParser.parse(contents, request.environment, request.environment)
+  contents = contents:gsub("[\n\r]", "")
+
+  return FS.get_temp_file(contents), contents
+end
+
+local function process_graphql(request)
+  local has_graphql_meta_tag = PARSER_UTILS.contains_meta_tag(request, "graphql")
+  local has_graphql_header = PARSER_UTILS.contains_header(request.headers, "x-request-type", "graphql")
+
+  local is_graphql = request.method == "GRAPHQL" or has_graphql_meta_tag or has_graphql_header
+
+  if is_graphql and request.body and #request.body > 0 then
+    local content_type_header_name = PARSER_UTILS.get_header(request.headers, "Content-Type") or "Content-Type"
+
+    request.method = "POST"
+    request.type = "graphql"
+    request.headers[content_type_header_name] = "application/json"
+
+    if not has_graphql_header then request.headers["x-request-type"] = "GraphQL" end
+
+    request.body_computed = request.body:gsub("\n<%s([^\n]+)", function(path)
+      local _, contents = get_file_with_replaced_variables(path, request)
+      return contents and ("\n" .. contents) or ""
+    end)
+
+    local gql_json = GRAPHQL_PARSER.get_json(request.body_computed)
+    if gql_json then request.body_computed = gql_json end
+  end
+
+  return request
+end
+
 ---Replace the variables in the URL, headers and body
 ---@param request Request -- The request object
 ---@param silent boolean|nil -- Whether to suppress not found variable warnings
@@ -175,7 +216,20 @@ local process_variables = function(request, silent)
   request.cookie = StringVariablesParser.parse(request.cookie, unpack(params))
   request.body = StringVariablesParser.parse(request.body_raw, unpack(params))
   request.body_display = StringVariablesParser.parse(request.body_display, unpack(params))
-  request.body_computed = StringVariablesParser.parse(request.body_raw, unpack(params))
+  -- INFO:
+  -- Special treatment for GraphQL requests:
+  -- we need to replace variables in the body before parsing GraphQL,
+  -- because the body may contain already parsed GQL.
+  -- See:
+  -- - GraphQL request with pre-request script, body not converted to json
+  --   https://github.com/mistweaverco/kulala.nvim/issues/844
+  -- - Variables in request body not re-evaluated on request.replay()
+  --   https://github.com/mistweaverco/kulala.nvim/issues/814
+  if request.type == "graphql" then
+    process_graphql(request)
+  else
+    request.body_computed = StringVariablesParser.parse(request.body_raw, unpack(params))
+  end
 
   vim.iter(request.redirect_response_body_to_files):each(function(redirect)
     redirect.file = StringVariablesParser.parse(redirect.file, unpack(params))
@@ -188,19 +242,6 @@ local process_variables = function(request, silent)
   request.environment = vim.tbl_extend("keep", env, request.variables)
 
   return env
-end
-
-local function get_file_with_replaced_variables(path, request)
-  local contents = FS.read_file(path)
-
-  if vim.fn.fnamemodify(path, ":e") == "graphql" or vim.fn.fnamemodify(path, ":e") == "gql" then
-    contents = contents:gsub("#[^\n]*", "") -- remove comments from GraphQL files
-  end
-
-  contents = StringVariablesParser.parse(contents, request.environment, request.environment)
-  contents = contents:gsub("[\n\r]", "")
-
-  return FS.get_temp_file(contents), contents
 end
 
 ---Save body to a temporary file, including files specified with "< /path" syntax into request body
@@ -282,32 +323,6 @@ local function set_headers(request, env)
   end)
 
   request.headers_display = vim.deepcopy(request.headers)
-end
-
-local function process_graphql(request)
-  local has_graphql_meta_tag = PARSER_UTILS.contains_meta_tag(request, "graphql")
-  local has_graphql_header = PARSER_UTILS.contains_header(request.headers, "x-request-type", "graphql")
-
-  local is_graphql = request.method == "GRAPHQL" or has_graphql_meta_tag or has_graphql_header
-
-  if is_graphql and request.body and #request.body > 0 then
-    local content_type_header_name = PARSER_UTILS.get_header(request.headers, "Content-Type") or "Content-Type"
-
-    request.method = "POST"
-    request.headers[content_type_header_name] = "application/json"
-
-    if not has_graphql_header then request.headers["x-request-type"] = "GraphQL" end
-
-    request.body_computed = request.body:gsub("\n<%s([^\n]+)", function(path)
-      local _, contents = get_file_with_replaced_variables(path, request)
-      return contents and ("\n" .. contents) or ""
-    end)
-
-    local gql_json = GRAPHQL_PARSER.get_json(request.body_computed)
-    if gql_json then request.body_computed = gql_json end
-  end
-
-  return request
 end
 
 local function process_pre_request_scripts(request)
@@ -653,6 +668,7 @@ M.parse = function(requests, document_request)
   set_headers(request, env)
 
   request.url = encode_url(request.url, request.method)
+  request.type = "rest"
   process_graphql(request)
 
   local json = vim.json.encode(request)
@@ -666,6 +682,7 @@ M.parse = function(requests, document_request)
 
   if request.method == "GRPC" then
     build_grpc_command(request)
+    request.type = "grpc"
   else
     build_curl_command(request)
   end
