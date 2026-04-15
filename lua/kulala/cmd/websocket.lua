@@ -1,5 +1,4 @@
 local Config = require("kulala.config")
-local Keymaps = require("kulala.config.keymaps")
 local Logger = require("kulala.logger")
 
 local M = {}
@@ -10,10 +9,12 @@ M.response = nil
 M.on_stdout = function(_, data, callback)
   if not data or #data == 0 then return end
 
-  data = "\n=> " .. data
-  M.response.body = M.response.body .. data
-
+  data = "\n↓\n" .. data
+  local oldcontent = vim.split(M.response.body, "\n", { trimempty = true })
+  M.response.body = table.concat(oldcontent, "\n") .. data
   callback(true, 0, M.response.line)
+  local ui_buf = require("kulala.ui").get_kulala_buffer()
+  if ui_buf then vim.fn.matchadd("Comment", [[^↓$]], 10, -1, { buffer = ui_buf }) end
 end
 
 M.on_stderr = function(_, data, callback)
@@ -36,17 +37,6 @@ M.on_exit = function(system, _, callback)
   M.response.body = M.response.body:gsub("^.-\n.-\n", "Connection closed\n")
 
   callback(M.response.status, 0, M.response.line)
-end
-
-local function set_welcome_message()
-  local keymaps = Keymaps.get_kulala_keymaps() or {}
-  local send_key = keymaps["Jump to response"][1] .. "\\" .. keymaps["Send WS message"][1]
-  local close_key = keymaps["Interrupt requests"][1]
-
-  M.response.body = ("Connected... Waiting for data.\nPress %s to send message and %s to close connection.\n\n"):format(
-    send_key,
-    close_key
-  ) .. M.response.body
 end
 
 function M.connect(request, response, callback, opts)
@@ -82,7 +72,6 @@ function M.connect(request, response, callback, opts)
   M.response = response
 
   _ = #request.body_computed > 0 and M.send(request.body_computed)
-  set_welcome_message()
 
   return result.pid
 end
@@ -104,7 +93,7 @@ end
 
 local function update_response()
   local ui_buf = require("kulala.ui").get_kulala_buffer()
-  local lines = ui_buf and vim.api.nvim_buf_get_lines(ui_buf, 4, -1, false) or {}
+  local lines = ui_buf and vim.api.nvim_buf_get_lines(ui_buf, 0, -1, false) or {}
 
   M.response.body = table.concat(lines, "\n")
 end
