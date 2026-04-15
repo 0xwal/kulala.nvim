@@ -199,7 +199,8 @@ local function show(contents, filetype, mode)
   _ = mode ~= "report" and REPORT.set_response_summary(buf)
 
   local win = open_kulala_window(buf)
-  local lnum = mode == "report" and vim.api.nvim_buf_line_count(buf) or 4
+  local lnum = mode == "report" and vim.api.nvim_buf_line_count(buf)
+  or (CONFIG.get().ui.show_request_summary and 4 or 1)
 
   vim.fn.win_execute(win, "normal! " .. lnum .. "G")
 
