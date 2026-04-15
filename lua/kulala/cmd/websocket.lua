@@ -31,7 +31,7 @@ end
 
 M.on_exit = function(system, _, callback)
   M.response.code = system.code == 0 and -1 or system.code
-  M.response.status = false
+  M.response.status = system.code == 0
 
   M.response.body = M.response.body:gsub("^.-\n.-\n", "Connection closed\n")
 
